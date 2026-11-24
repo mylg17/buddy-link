@@ -1,0 +1,13 @@
+name: Feature request
+description: 提一个新需求
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: 需求描述
+  - type: textarea
+    id: why
+    attributes:
+      label: 使用场景
+

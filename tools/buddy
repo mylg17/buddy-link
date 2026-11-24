@@ -1,0 +1,261 @@
+#!/usr/bin/env node
+// buddy —— 把指令发给 B 执行并打印结果（MCP 不可用时的兜底通道）
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const cfgPath = process.env.BUDDY_ENV || path.join(os.homedir(), '.buddy-link', 'env.json');
+let cfg = {};
+try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch {}
+const URL_BASE = (process.env.BUDDY_URL || cfg.url || '').replace(/\/+$/, '');
+const TOKEN = process.env.BUDDY_TOKEN || cfg.token || '';
+const isUi = process.argv[2] === 'ui';
+const CANVAS = process.argv[2] === '--canvas' ? process.argv[3] : null;
+const prompt = (CANVAS ? process.argv.slice(4) : process.argv.slice(2)).join(' ');
+if (!URL_BASE || !TOKEN) { console.error('缺少 BUDDY_URL / BUDDY_TOKEN（~/.buddy-link/env.json）'); process.exit(2); }
+if (!prompt.trim()) { console.error('用法: buddy "指令"  |  buddy ui "指令"'); process.exit(2); }
+
+const isAuto = process.argv[2] === 'auto';
+const isResult = process.argv[2] === 'result';
+
+async function pollResult(id, timeoutMs) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const r = await fetch(URL_BASE + '/result?id=' + encodeURIComponent(id), { headers: { authorization: 'Bearer ' + TOKEN } });
+    const j = await r.json().catch(() => ({}));
+    if (j.ok && j.text) return j;
+    if (j.ok && j.status && j.status !== 'working' && j.status !== 'running') return j;
+    await new Promise((res) => setTimeout(res, 4000));
+  }
+  return null;
+}
+
+async function listSessions() {
+  const r = await fetch(URL_BASE + '/sessions', { headers: { authorization: 'Bearer ' + TOKEN } });
+  const j = await r.json().catch(() => ({}));
+  return Array.isArray(j.sessions) ? j.sessions : [];
+}
+
+async function sessionByTitle(title) {
+  if (!title) return null;
+  const ss = await listSessions();
+  return ss.find((s) => s.title === title) || null;
+}
+
+async function resultFor(sid) {
+  const r = await fetch(URL_BASE + '/result?id=' + encodeURIComponent(sid), { headers: { authorization: 'Bearer ' + TOKEN } });
+  return await r.json().catch(() => ({}));
+}
+
+if (isResult) {
+  const id = process.argv[3];
+  const j = await pollResult(id, 20000);
+  if (j && j.text) { console.log('【B 的结果】\n' + j.text); process.exit(0); }
+  console.log(JSON.stringify(j || { ok: false, phase: 'pending' }));
+  process.exit(j && j.ok ? 0 : 1);
+}
+
+async function pullArtifacts(canvas, since) {
+  try {
+    const r = await fetch(URL_BASE + '/changes?since=' + since, { headers: { authorization: 'Bearer ' + TOKEN } });
+    const j = await r.json().catch(() => ({}));
+    if (!j.ok || !j.files || !j.files.length) return;
+    const fsm = await import('node:fs');
+    const pathm = await import('node:path');
+    const osm = await import('node:os');
+    const dir = pathm.join(osm.homedir(), 'BuddyLink', 'artifacts', canvas.slice(0, 8));
+    fsm.mkdirSync(dir, { recursive: true });
+    const saved = [];
+    for (const f of j.files) {
+      const res = await fetch(URL_BASE + '/file?path=' + encodeURIComponent(f.rel), { headers: { authorization: 'Bearer ' + TOKEN } });
+      if (!res.ok) continue;
+      const dest = pathm.join(dir, pathm.basename(f.rel));
+      fsm.writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
+      saved.push(dest);
+    }
+    if (saved.length) {
+      console.log('\n【产物已回传】');
+      for (const s of saved) console.log('- ' + s);
+    }
+  } catch (e) { console.error('产物回传失败：' + e.message); }
+}
+
+if (isAuto) {
+  const rawArgs = process.argv.slice(3);
+  const files = [];
+  const words = [];
+  let canvasArg = '';
+  for (let i = 0; i < rawArgs.length; i++) {
+    const a = rawArgs[i];
+    if (a === '--file' && rawArgs[i + 1]) { files.push(rawArgs[i + 1]); i++; continue; }
+    if (a.startsWith('--file=')) { files.push(a.slice(7)); continue; }
+    if (a === '--canvas' && rawArgs[i + 1]) { canvasArg = rawArgs[i + 1]; i++; continue; }
+    words.push(a);
+  }
+  const promptText = words.join(' ');
+  if (!promptText.trim()) { console.error('用法: buddy auto "指令" [--file 路径]'); process.exit(2); }
+
+  const fsm = await import('node:fs');
+  const pathm = await import('node:path');
+  const osm = await import('node:os');
+  function detectCanvas() {
+    try {
+      const root = pathm.join(osm.homedir(), '.workbuddy', 'projects');
+      let best = null, bestT = 0;
+      for (const d of fsm.readdirSync(root)) {
+        const dir = pathm.join(root, d);
+        let st; try { st = fsm.statSync(dir); } catch { continue; }
+        if (!st.isDirectory()) continue;
+        for (const f of fsm.readdirSync(dir)) {
+          if (!f.endsWith('.jsonl')) continue;
+          const s2 = fsm.statSync(pathm.join(dir, f));
+          if (s2.mtimeMs > bestT) { bestT = s2.mtimeMs; best = f.replace(/\.jsonl$/, ''); }
+        }
+      }
+      return best || 'default';
+    } catch { return 'default'; }
+  }
+  const canvas = canvasArg || detectCanvas();
+  const stateFile = pathm.join(osm.homedir(), '.buddy-link', 'canvas.json');
+  let state = {};
+  try { state = JSON.parse(fsm.readFileSync(stateFile, 'utf8')); } catch {}
+  const cur = state[canvas] || {};
+
+  let finalPrompt = promptText;
+  const uploaded = [];
+  for (const f of files) {
+    try {
+      const buf = fsm.readFileSync(f);
+      const up = await fetch(URL_BASE + '/upload', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ name: pathm.basename(f), data_b64: buf.toString('base64') }),
+      });
+      const uj = await up.json().catch(() => ({}));
+      if (uj.ok) uploaded.push(uj.path);
+    } catch (err) { console.error('附件上传失败：' + f + ' ' + err.message); }
+  }
+  if (uploaded.length) finalPrompt += '\n\n附件已上传到 B（请直接读取这些路径）：\n' + uploaded.join('\n');
+
+  const startedAt = Date.now() - 5000;
+  const title = cur.title || promptText.slice(0, 40);
+  let preText = '', preUpdated = 0;
+  if (cur.sessionId) {
+    const pre = await fetch(URL_BASE + '/result?id=' + encodeURIComponent(cur.sessionId), { headers: { authorization: 'Bearer ' + TOKEN } }).then((r) => r.json()).catch(() => ({}));
+    preText = pre.text || '';
+    preUpdated = Number(pre.updatedAt) || 0;
+  }
+  let viaCdp = false;
+  try {
+    const res = await fetch(URL_BASE + '/cdp', {
+      method: 'POST',
+      headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+      body: JSON.stringify(cur.title ? { prompt: finalPrompt, title: cur.title } : { prompt: finalPrompt }),
+    });
+    const j = await res.json().catch(() => ({}));
+    viaCdp = !!j.ok;
+    if (viaCdp) console.error(cur.title ? '已送入 B 的同一个会话…' : '已在 B 新建会话…');
+  } catch {}
+
+  if (viaCdp) {
+    state[canvas] = { mode: 'cdp', title, sessionId: cur.sessionId, updatedAt: Date.now() };
+    fsm.mkdirSync(pathm.dirname(stateFile), { recursive: true });
+    fsm.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+    const endTs = Date.now() + 300000;
+    let sid = cur.sessionId || null;
+    while (Date.now() < endTs) {
+      if (!sid) {
+        if (cur.title) {
+          const bt = await fetch(URL_BASE + '/by-title?q=' + encodeURIComponent(cur.title), { headers: { authorization: 'Bearer ' + TOKEN } }).then((r) => r.json()).catch(() => ({}));
+          if (bt.sessionId) sid = bt.sessionId;
+        }
+        if (!sid) {
+          const la = await fetch(URL_BASE + '/latest?since=0', { headers: { authorization: 'Bearer ' + TOKEN } }).then((r) => r.json()).catch(() => ({}));
+          if (la.sessionId && la.title && la.title.indexOf('WorkBuddy 每小时') < 0) { sid = la.sessionId; state[canvas].title = la.title; }
+        }
+        if (sid) { state[canvas].sessionId = sid; fsm.writeFileSync(stateFile, JSON.stringify(state, null, 2)); }
+      }
+      if (sid) {
+        const rs = await fetch(URL_BASE + '/result?id=' + encodeURIComponent(sid), { headers: { authorization: 'Bearer ' + TOKEN } }).then((r) => r.json()).catch(() => ({}));
+        const newTurn = (!preText && rs.text) || (rs.text && rs.text !== preText);
+        if (newTurn && rs.status && rs.status !== 'working') {
+          console.log(rs.text);
+          await pullArtifacts(canvas, startedAt);
+          process.exit(0);
+        }
+      }
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    console.log('已送入 B 的会话，但 300 秒内未取到新结果。');
+    process.exit(0);
+  }
+
+  // 回退：一次性任务（新建会话，携带上下文）
+  const history = Array.isArray(cur.history) ? cur.history : [];
+  if (history.length) {
+    const ctx = history.slice(-6).map((h, i) => '第' + (i + 1) + '轮\n用户：' + h.u + '\n助手：' + h.a).join('\n\n');
+    finalPrompt = '【前情提要：这是同一个对话的延续】\n' + ctx + '\n\n【本轮任务】\n' + finalPrompt;
+  }
+  const res2 = await fetch(URL_BASE + '/auto', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt: finalPrompt }),
+  });
+  const j2 = await res2.json().catch(() => ({}));
+  if (!j2.ok) { console.error('下发失败：' + JSON.stringify(j2).slice(0, 300)); process.exit(1); }
+  console.error('CDP 不可用，已退回一次性任务（新会话，携带上下文）…');
+  const done = await pollResult(j2.automationId, 240000);
+  if (done && done.text) {
+    history.push({ u: promptText.slice(0, 400), a: String(done.text).slice(0, 600) });
+    state[canvas] = { mode: 'auto', history: history.slice(-10), updatedAt: Date.now() };
+    fsm.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+    console.log(done.text);
+    await pullArtifacts(canvas, startedAt);
+    process.exit(0);
+  }
+  console.log('已下发，但未取到结果。automationId=' + j2.automationId);
+  process.exit(0);
+}
+
+if (isUi) {
+  const res2 = await fetch(URL_BASE + '/ui', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt, mode: process.env.BUDDY_UI_MODE || 'home' }),
+  });
+  const j = await res2.json().catch(() => ({}));
+  console.log(j.delivered ? '已下发到 B 的 WorkBuddy：' + j.note : '未送达：' + (j.note || j.error));
+  process.exit(j.delivered ? 0 : 1);
+}
+
+const stateFile = path.join(os.homedir(), '.buddy-link', 'cli-sessions.json');
+let state = {};
+try { state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch {}
+const canvas = CANVAS || 'cli';
+const sessionId = state[canvas];
+
+const res = await fetch(URL_BASE + '/run', {
+  method: 'POST',
+  headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+  body: JSON.stringify({ prompt, sessionId, permissionMode: 'bypassPermissions' }),
+});
+if (!res.ok) { console.error('B 拒绝: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 300)); process.exit(1); }
+
+const dec = new TextDecoder();
+let buf = '', text = '';
+for await (const chunk of res.body) {
+  buf += dec.decode(chunk, { stream: true });
+  let i;
+  while ((i = buf.indexOf('\n\n')) >= 0) {
+    const block = buf.slice(0, i); buf = buf.slice(i + 2);
+    const line = block.split('\n').find((l) => l.startsWith('data:'));
+    if (!line) continue;
+    let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
+    if (ev.type === 'delta') { text += ev.text; process.stderr.write(ev.text); }
+    else if (ev.type === 'tool_use') process.stderr.write('\n[工具] ' + (ev.tools || []).map((t) => t.name).join(', '));
+    else if (ev.type === 'done') {
+      if (ev.sessionId) { state[canvas] = ev.sessionId; fs.mkdirSync(path.dirname(stateFile), { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify(state, null, 2)); }
+      process.stdout.write('\n---\n' + (ev.text || text) + '\n');
+    }
+  }
+}

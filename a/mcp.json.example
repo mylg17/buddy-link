@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "buddy-link": {
+      "command": "node",
+      "args": [
+        "/Users/example/Desktop/www/dev/buddy-link/a/remote-buddy.mjs"
+      ],
+      "env": {
+        "BUDDY_URL": "http://100.64.1.23:8765",
+        "BUDDY_TOKEN": "把 B 端 config 里的 token 填这里"
+      }
+    }
+  }
+}

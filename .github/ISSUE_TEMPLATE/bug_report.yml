@@ -1,0 +1,28 @@
+name: Bug report
+description: 报告一个问题
+labels: [bug]
+body:
+  - type: input
+    id: workbuddy
+    attributes:
+      label: WorkBuddy 版本
+      placeholder: 5.11.3
+  - type: dropdown
+    id: combo
+    attributes:
+      label: 组合
+      options:
+        - A macOS + B Windows
+        - A Windows + B Windows
+        - A macOS + B macOS
+        - A Windows + B macOS
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 附上 buddy auto 的输出、B 的 /health、9222 探测结果
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+

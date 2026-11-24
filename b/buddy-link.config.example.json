@@ -1,0 +1,14 @@
+{
+  "platform": "win32",
+  "homeDir": "C:\\\\Users\\\\Administrator",
+  "workdir": "C:\\\\buddy-link\\\\work",
+  "autoDb": "C:\\\\Users\\\\Administrator\\\\.workbuddy\\\\workbuddy.db",
+  "projectsDir": "C:\\\\Users\\\\Administrator\\\\.workbuddy\\\\projects",
+  "nodeBin": "C:\\\\Program Files\\\\nodejs\\\\node.exe",
+  "token": "请替换为 40 位随机串",
+  "host": "0.0.0.0",
+  "port": 8765,
+  "permissionMode": "bypassPermissions",
+  "appLaunch": "C:\\\\Program Files\\\\WorkBuddy\\\\WorkBuddy.exe --remote-debugging-port=9222",
+  "autostart": "schtasks"
+}

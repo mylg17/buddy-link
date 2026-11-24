@@ -1,0 +1,11 @@
+{
+  "name": "buddy-link-bridge",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "description": "BuddyLink B-side bridge: run CodeBuddy CLI on this machine and stream results back to A",
+  "main": "bridge.mjs",
+  "scripts": {
+    "start": "node bridge.mjs"
+  }
+}
